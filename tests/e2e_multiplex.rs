@@ -920,3 +920,82 @@ async fn e2e_surfaces_stderr_and_exit_code_when_lsp_crashes_on_init() {
     );
     env.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn e2e_custom_shim_path_and_overwrite_guard() {
+    let env = TestEnv::new("custom_shim");
+    let mock_log = env._root_dir.path.join("mock_custom_shim.jsonl");
+    let real_bin = env.create_mock_wrapper("real", "mymock", &mock_log);
+    let custom_dir = env._root_dir.path.join("custom_shims");
+    let custom_shim_path = custom_dir.join("custom-mock");
+
+    // 1. Guard: refusing to overwrite the real target binary with its own shim
+    let guard_out = env
+        .run_cli(&[
+            "shim",
+            "add",
+            real_bin.to_str().unwrap(),
+            "--target",
+            real_bin.to_str().unwrap(),
+        ])
+        .await;
+    assert!(
+        !guard_out.status.success(),
+        "expected overwrite guard to reject overwriting real target binary"
+    );
+
+    // 2. Create shim at an arbitrary custom file path outside default shim_dir
+    let add_out = env
+        .run_cli(&[
+            "shim",
+            "add",
+            "mymock",
+            "-o",
+            custom_shim_path.to_str().unwrap(),
+            "--target",
+            real_bin.to_str().unwrap(),
+        ])
+        .await;
+    assert!(
+        add_out.status.success(),
+        "custom shim add failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+    assert!(custom_shim_path.exists());
+
+    // 3. Verify `shim list` shows the custom path
+    let list_out = env.run_cli(&["shim", "list"]).await;
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        list_str.contains("custom-mock") && list_str.contains("present"),
+        "unexpected shim list output: {list_str}"
+    );
+
+    // 4. Invoke the custom shim directly via argv[0]
+    let ws_uri = file_uri(&env.workspace_dir);
+    let mut client = LspTestClient::spawn_direct(&env, &custom_shim_path).await;
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "rootUri": ws_uri, "capabilities": {} }
+        }))
+        .await;
+    let (init, _) = client.wait_response_with_cfg(1, None).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "mock-lsp");
+    client.shutdown_and_exit().await;
+
+    // 5. Remove custom shim cleanly
+    let rm_out = env
+        .run_cli(&["shim", "remove", custom_shim_path.to_str().unwrap()])
+        .await;
+    assert!(
+        rm_out.status.success(),
+        "shim remove failed: {}",
+        String::from_utf8_lossy(&rm_out.stderr)
+    );
+    assert!(!custom_shim_path.exists());
+
+    env.stop_daemon().await;
+}

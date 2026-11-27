@@ -46,11 +46,15 @@ lsp-share proxy -- pyright-langserver --stdio
 When an editor setting only accepts a single binary path (no extra arguments):
 
 ```bash
+# Default location (~/.lsp-share/bin/clangd or %USERPROFILE%\.lsp-share\bin\clangd.exe)
 lsp-share shim add clangd --target /opt/homebrew/bin/clangd
-# Creates ~/.lsp-share/bin/clangd -> lsp-share
+
+# Or place the shim anywhere you want (custom file path or directory via -o/--output):
+lsp-share shim add D:\shims\clangd.exe --target C:\LLVM\bin\clangd.exe
+lsp-share shim add clangd -o D:\shims\ --target C:\LLVM\bin\clangd.exe
 ```
 
-Then configure `"clangd.path": "~/.lsp-share/bin/clangd"`.
+Then configure `"clangd.path"` to point to your shim path (e.g. `~/.lsp-share/bin/clangd` or `D:\shims\clangd.exe`).
 
 ## CLI Commands
 

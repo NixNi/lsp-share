@@ -54,12 +54,12 @@ lsp-share restart <INSTANCE_ID>  # Restart an LSP instance (clients reconnect cl
 ```
 
 ### `lsp-share shim`
-Manages transparent `argv[0]` shims for editors or tools whose settings only accept a single executable path (e.g., `"clangd.path"`).
+Manages transparent `argv[0]` shims for editors or tools whose settings only accept a single executable path (e.g., `"clangd.path"`). By default shims are placed in `~/.lsp-share/bin/` (`%USERPROFILE%\.lsp-share\bin\`), or you can specify any custom path or directory with `-o`/`--output` or a path argument.
 
 ```bash
-lsp-share shim add <NAME> [--target <REAL_BINARY_PATH>] [--role <editor|agent>]
+lsp-share shim add <NAME_OR_PATH> [-o <OUTPUT_PATH_OR_DIR>] [--target <REAL_BINARY_PATH>] [--role <editor|agent>]
 lsp-share shim list
-lsp-share shim remove <NAME>
+lsp-share shim remove <NAME_OR_PATH>
 ```
 
 ---

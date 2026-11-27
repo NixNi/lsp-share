@@ -110,9 +110,13 @@ struct ShimArgs {
 
 #[derive(Subcommand)]
 enum ShimAction {
-    /// Add a transparent argv[0] shim in ~/.lsp-share/bin
+    /// Add a transparent argv[0] shim (in ~/.lsp-share/bin by default, or any custom path)
     Add {
+        /// Server name (e.g. `clangd`) or destination shim file path (e.g. `D:\shims\clangd.exe`)
         name: String,
+        /// Custom output file path or directory where the shim binary should be created
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
         #[arg(long)]
         target: Option<PathBuf>,
         #[arg(long, value_enum)]
@@ -215,11 +219,12 @@ async fn main() -> Result<()> {
         Commands::Shim(args) => match args.action {
             ShimAction::Add {
                 name,
+                output,
                 target,
                 role,
                 key,
                 config,
-            } => shim::add_shim(&name, target, role, key, config.as_deref()),
+            } => shim::add_shim(&name, output, target, role, key, config.as_deref()),
             ShimAction::List { config } => shim::list_shims(config.as_deref()),
             ShimAction::Remove { name, config } => shim::remove_shim(&name, config.as_deref()),
         },

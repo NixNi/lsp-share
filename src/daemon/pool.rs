@@ -85,9 +85,18 @@ impl Pool {
 
         let path_env = hello.env.get("PATH").map(|s| s.as_str());
         let shim_dir = paths::shim_bin_dir();
-        let requested_resolved =
+        let mut requested_resolved =
             paths::resolve_executable(&hello.command, path_env, Some(&shim_dir))
                 .unwrap_or_else(|_| PathBuf::from(&hello.command));
+        if let Some(sc) = self.config.shims.get(&server_name) {
+            if let Some(ref shim_path) = sc.path {
+                if paths::normalize_uri_or_path(&requested_resolved.to_string_lossy())
+                    == paths::normalize_uri_or_path(&shim_path.to_string_lossy())
+                {
+                    requested_resolved = sc.target.clone();
+                }
+            }
+        }
 
         let binary_matching = hello.match_by.unwrap_or(settings.binary_matching);
         let server_key = compute_server_key(

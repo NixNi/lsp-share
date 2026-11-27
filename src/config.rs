@@ -95,6 +95,8 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub target: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<ClientRole>,
