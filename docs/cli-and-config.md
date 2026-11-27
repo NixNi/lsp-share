@@ -96,7 +96,7 @@ When `lsp-share` starts, it inspects its own invoked filename (`argv[0]`):
 ```toml
 [daemon]
 # Keep an LSP server warm after its last client disconnects (0 = never auto-stop)
-idle_timeout_secs = 300
+idle_timeout_secs = 30
 # Log level: error | warn | info | debug | trace
 log_level = "info"
 # Optional global JSONL wire-tap log for debugging custom LSP clients

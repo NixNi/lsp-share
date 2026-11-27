@@ -50,7 +50,7 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            idle_timeout_secs: 300,
+            idle_timeout_secs: 30,
             log_level: "info".to_string(),
             trace_file: None,
         }
@@ -218,6 +218,7 @@ mod tests {
     #[test]
     fn defaults_use_aggressive_name_matching_and_editor_wins() {
         let cfg = Config::default();
+        assert_eq!(cfg.daemon.idle_timeout_secs, 30);
         assert_eq!(cfg.matching.binary_matching, BinaryMatching::Name);
         assert_eq!(cfg.matching.arg_matching, ArgMatching::Ignore);
         assert_eq!(

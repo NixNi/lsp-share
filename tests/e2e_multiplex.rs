@@ -821,3 +821,102 @@ async fn e2e_real_clangd_sharing_and_utf16() {
     c1.shutdown_and_exit().await;
     env.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn e2e_proxy_exits_without_closing_stdin_and_idle_cleanup() {
+    let env = TestEnv::new("idle");
+    std::fs::write(&env.config_path, "[daemon]\nidle_timeout_secs = 2\n").unwrap();
+
+    let mock_log = env._root_dir.path.join("mock_idle.jsonl");
+    let bin = env.create_mock_wrapper("bin", "mock-server", &mock_log);
+    let ws_uri = file_uri(&env.workspace_dir);
+
+    let mut client = LspTestClient::spawn_proxy(&env, "agent", &bin, &[]).await;
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "rootUri": ws_uri, "capabilities": {} }
+        }))
+        .await;
+    let _ = client.wait_response_with_cfg(1, None).await;
+    client
+        .send(&json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": null
+        }))
+        .await;
+    let _ = client.wait_response_with_cfg(2, None).await;
+    client
+        .send(&json!({ "jsonrpc": "2.0", "method": "exit", "params": null }))
+        .await;
+
+    // Keep client.stdin open on purpose: proxy must exit promptly after forwarding `exit`.
+    let _kept_stdin = client.stdin;
+    let status = tokio::time::timeout(Duration::from_secs(3), client.child.wait())
+        .await
+        .expect("proxy did not exit promptly after LSP exit while stdin stayed open")
+        .unwrap();
+    assert!(status.success());
+    drop(_kept_stdin);
+
+    // Wait for both the idle LSP server (2s) and the idle daemon (2s) to shut down automatically.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let st_out = env.run_cli(&["status", "--json"]).await;
+    let st_json: Value = serde_json::from_slice(&st_out.stdout).unwrap();
+    assert_eq!(
+        st_json["running"], false,
+        "expected idle daemon to exit automatically, got: {st_json}"
+    );
+
+    let log_str = std::fs::read_to_string(&mock_log).unwrap();
+    assert!(
+        log_str.contains(r#""method":"shutdown""#),
+        "expected daemon to gracefully shut down idle LSP: {log_str}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn e2e_surfaces_stderr_and_exit_code_when_lsp_crashes_on_init() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new("crash_stderr");
+    let fail_script = env._root_dir.path.join("flyweight-lsp");
+    std::fs::write(
+        &fail_script,
+        "#!/bin/sh\necho 'LOCK_ERROR: db locked at d:\\cache' >&2\nexit 42\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fail_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ws_uri = file_uri(&env.workspace_dir);
+    let mut client = LspTestClient::spawn_proxy(&env, "agent", &fail_script, &[]).await;
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "rootUri": ws_uri, "capabilities": {} }
+        }))
+        .await;
+    let (resp, _) = client.wait_response_with_cfg(1, None).await;
+    let err_msg = resp["error"]["message"].as_str().unwrap_or("");
+    assert_eq!(resp["error"]["code"], -32603);
+    assert!(
+        err_msg.contains("42"),
+        "expected exit code 42 in error: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("LOCK_ERROR: db locked"),
+        "expected stderr line in error: {err_msg}"
+    );
+    env.stop_daemon().await;
+}

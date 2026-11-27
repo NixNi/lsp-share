@@ -211,6 +211,10 @@ impl Pool {
         Ok((inst_id, tx))
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.instances.lock().await.is_empty()
+    }
+
     pub async fn status(&self) -> DaemonStatusPayload {
         let entries: Vec<mpsc::Sender<ActorCmd>> = {
             let guard = self.instances.lock().await;

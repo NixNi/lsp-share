@@ -1,6 +1,7 @@
 use crate::config::{ClientRole, OpenConflictPolicy};
 use crate::daemon::documents::DocumentManager;
 use crate::ipc::{self, ChildTracker};
+use crate::paths;
 use crate::protocol::frame::{
     read_lsp_frame, write_lsp_frame, ClientStatusInfo, InstanceStatusInfo,
 };
@@ -12,6 +13,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
@@ -116,6 +118,7 @@ struct ChildProcessHandle {
     pid: Option<u32>,
     stdin_tx: mpsc::Sender<Vec<u8>>,
     stdout_rx: mpsc::Receiver<Option<Vec<u8>>>,
+    recent_stderr: Arc<Mutex<VecDeque<String>>>,
 }
 
 pub fn spawn_instance_actor(
@@ -131,10 +134,20 @@ pub fn spawn_instance_actor(
 
 async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle> {
     let mut cmd = ipc::build_lsp_command(&cfg.binary_path, &cfg.launch_args);
-    cmd.current_dir(&cfg.root);
+    let native_root = paths::to_native_os_path(&cfg.root);
+    if native_root.is_dir() {
+        cmd.current_dir(&native_root);
+    } else {
+        tracing::warn!(
+            instance = %cfg.id,
+            root = %native_root.display(),
+            "workspace root directory does not exist; spawning LSP in daemon cwd"
+        );
+    }
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
+    cmd.env("LSP_SHARE_SPAWNED_BY_DAEMON", "1");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -143,7 +156,7 @@ async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle
         format!(
             "failed to spawn LSP binary {} in {}",
             cfg.binary_path.display(),
-            cfg.root
+            native_root.display()
         )
     })?;
 
@@ -192,8 +205,10 @@ async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle
         }
     });
 
+    let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(20)));
     if let Some(err_stream) = stderr {
         let inst_id = cfg.id.clone();
+        let buf_ref = recent_stderr.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(err_stream);
             let mut line = String::new();
@@ -204,7 +219,14 @@ async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle
                     Ok(_) => {
                         let trimmed = line.trim_end();
                         if !trimmed.is_empty() {
-                            tracing::debug!(instance = %inst_id, "lsp stderr: {trimmed}");
+                            tracing::warn!(instance = %inst_id, "lsp stderr: {trimmed}");
+                            if let Ok(mut q) = buf_ref.lock() {
+                                if q.len() >= 20 {
+                                    q.pop_front();
+                                }
+                                let capped: String = trimmed.chars().take(512).collect();
+                                q.push_back(capped);
+                            }
                         }
                     }
                 }
@@ -217,7 +239,52 @@ async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle
         pid,
         stdin_tx,
         stdout_rx,
+        recent_stderr,
     })
+}
+
+async fn collect_child_exit_detail(
+    child_opt: &mut Option<ChildProcessHandle>,
+    binary_path: &std::path::Path,
+) -> String {
+    let Some(mut handle) = child_opt.take() else {
+        return format!(
+            "Underlying language server ({}) exited during initialize",
+            binary_path.display()
+        );
+    };
+    drop(handle.stdin_tx);
+    let status = tokio::time::timeout(Duration::from_millis(150), handle.child.wait())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    // Give the stderr reader task a brief tick to finish flushing the final line.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let stderr_joined = handle
+        .recent_stderr
+        .lock()
+        .map(|q| q.iter().cloned().collect::<Vec<_>>().join(" | "))
+        .unwrap_or_default();
+
+    let status_desc = match status {
+        Some(st) => match st.code() {
+            Some(code) => format!("exit code {code}"),
+            None => format!("{st}"),
+        },
+        None => "exited".to_string(),
+    };
+
+    if stderr_joined.is_empty() {
+        format!(
+            "Underlying language server ({}) exited during initialize ({status_desc})",
+            binary_path.display()
+        )
+    } else {
+        format!(
+            "Underlying language server ({}) exited during initialize ({status_desc}): {stderr_joined}",
+            binary_path.display()
+        )
+    }
 }
 
 async fn graceful_stop_child(child_opt: &mut Option<ChildProcessHandle>) {
@@ -1283,7 +1350,7 @@ async fn run_actor(
         }
     }
 
-    let mut idle_ticker = tokio::time::interval(Duration::from_secs(2));
+    let mut idle_ticker = tokio::time::interval(Duration::from_secs(1));
     idle_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
@@ -1384,7 +1451,10 @@ async fn run_actor(
                         state.handle_server_message(payload);
                     }
                     Some(None) | None => {
-                        tracing::warn!(instance = %state.cfg.id, "underlying LSP exited");
+                        let detail =
+                            collect_child_exit_detail(&mut state.child, &state.cfg.binary_path)
+                                .await;
+                        tracing::error!(instance = %state.cfg.id, "{detail}");
                         let prev_lifecycle =
                             std::mem::replace(&mut state.lifecycle, LifecycleState::ShuttingDown);
                         match prev_lifecycle {
@@ -1394,7 +1464,7 @@ async fn run_actor(
                             } => {
                                 let id_rv = RawValue::from_string(primary_init_orig_id)
                                     .unwrap_or_else(|_| RawValue::from_string("1".to_string()).unwrap());
-                                let err = jsonrpc::build_error_response(&id_rv, -32603, "Underlying language server exited during initialize");
+                                let err = jsonrpc::build_error_response(&id_rv, -32603, &detail);
                                 if let Some(&cid) = state.client_order.first() {
                                     state.send_to_client(cid, err, "init_exit_error", Some("initialize"));
                                 }
@@ -1403,13 +1473,13 @@ async fn run_actor(
                                         .ok()
                                         .and_then(|e| e.id.map(|r| r.to_owned()))
                                         .unwrap_or_else(|| RawValue::from_string("1".to_string()).unwrap());
-                                    let jerr = jsonrpc::build_error_response(&jid, -32603, "Underlying language server exited during initialize");
+                                    let jerr = jsonrpc::build_error_response(&jid, -32603, &detail);
                                     let _ = j.tx.try_send(jerr);
                                 }
                             }
                             LifecycleState::Restarting { waiters } => {
                                 for w in waiters {
-                                    let _ = w.send(Err(anyhow::anyhow!("LSP exited during restart")));
+                                    let _ = w.send(Err(anyhow::anyhow!("{detail}")));
                                 }
                             }
                             LifecycleState::Running | LifecycleState::ShuttingDown => {}
@@ -1523,6 +1593,9 @@ fn prepare_init_params(init_bytes: &[u8], force_utf16: bool) -> Value {
     });
 
     if let Some(obj) = params.as_object_mut() {
+        // Rewrite processId to the daemon's PID so the shared LSP doesn't exit
+        // if the first connecting client terminates while other clients remain active.
+        obj.insert("processId".to_string(), json!(std::process::id()));
         let caps = obj.entry("capabilities").or_insert_with(|| json!({}));
         merge_missing_json(caps, &rich_caps);
         if force_utf16 {

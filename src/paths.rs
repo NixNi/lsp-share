@@ -317,6 +317,40 @@ fn candidate_variants(base: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Canonicalizes `path` while stripping Windows `\\?\` verbatim prefixes that break
+/// legacy Win32 tools when passed via argv[0] or Command::current_dir.
+pub fn clean_canonicalize(path: &Path) -> PathBuf {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    #[cfg(windows)]
+    {
+        let s = canon.to_string_lossy();
+        if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+        canon
+    }
+    #[cfg(not(windows))]
+    {
+        canon
+    }
+}
+
+pub fn to_native_os_path(norm_path: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(norm_path.replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(norm_path)
+    }
+}
+
 /// Resolves an executable path without invoking any external crate, skipping `exclude_dir`
 /// and any symlink/hardlink pointing to the current `lsp-share` binary to prevent recursion.
 pub fn resolve_executable(
@@ -334,7 +368,7 @@ pub fn resolve_executable(
     if has_sep || cmd_path.is_absolute() {
         for cand in candidate_variants(cmd_path) {
             if is_executable_file(&cand) && !is_self_executable(&cand, self_canon.as_deref()) {
-                return Ok(std::fs::canonicalize(&cand).unwrap_or(cand));
+                return Ok(clean_canonicalize(&cand));
             }
         }
         return Err(anyhow!(
@@ -364,7 +398,7 @@ pub fn resolve_executable(
         let base = dir.join(cmd);
         for cand in candidate_variants(&base) {
             if is_executable_file(&cand) && !is_self_executable(&cand, self_canon.as_deref()) {
-                return Ok(std::fs::canonicalize(&cand).unwrap_or(cand));
+                return Ok(clean_canonicalize(&cand));
             }
         }
     }
@@ -488,9 +522,9 @@ pub fn normalize_workspace_root(
 
 pub fn capture_relevant_env() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    for key in ["PATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONPATH"] {
-        if let Ok(val) = std::env::var(key) {
-            map.insert(key.to_string(), val);
+    for (key, val) in std::env::vars() {
+        if !key.starts_with("LSP_SHARE_") {
+            map.insert(key, val);
         }
     }
     map

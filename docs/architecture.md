@@ -65,7 +65,7 @@ When `lsp-share proxy` starts, it executes a double-checked locking sequence:
 
 ## Child Process Lifecycle & OS Safeguards
 
-- **Idle Keep-Alive (`idle_timeout_secs`):** When the last client disconnects from an `InstanceActor`, the real LSP process stays warm for a configurable TTL (default: `300 s`, `0` = keep alive until explicit stop or daemon exit). If a client reconnects before expiration, the timer is cancelled.
+- **Idle Keep-Alive (`idle_timeout_secs`):** When the last client disconnects from an `InstanceActor`, the real LSP process stays warm for a configurable TTL (default: `30 s`, `0` = keep alive until explicit stop or daemon exit). If a client reconnects before expiration, the timer is cancelled. Once all instances and client connections are gone, the daemon itself also exits cleanly after a short grace period (`<= 5 s`).
 - **Graceful LSP Shutdown:** On idle expiration or `lsp-share stop`:
   1. Daemon sends LSP `shutdown` request to the real server (timeout: `3 s`).
   2. Daemon sends LSP `exit` notification (timeout: `2 s`).

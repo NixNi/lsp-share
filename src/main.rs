@@ -159,6 +159,15 @@ fn should_dispatch_as_shim(argv0: Option<&str>) -> Option<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut raw_args: Vec<String> = std::env::args().collect();
+    if std::env::var_os("LSP_SHARE_SPAWNED_BY_DAEMON").is_some()
+        && raw_args.get(1).map(String::as_str) != Some("__mock-lsp")
+    {
+        let argv0 = raw_args.first().map(String::as_str).unwrap_or("lsp-share");
+        eprintln!(
+            "lsp-share recursive spawn error: target binary '{argv0}' is a copy/shim of lsp-share itself, not the real LSP executable. Pass `--target <real-lsp-path>` to `lsp-share shim add` or point `lsp-share proxy` to the real binary."
+        );
+        std::process::exit(1);
+    }
     let argv0 = raw_args.first().map(String::as_str);
     if let Some(invoked_name) = should_dispatch_as_shim(argv0) {
         let pass_args = if raw_args.len() > 1 {
@@ -166,7 +175,9 @@ async fn main() -> Result<()> {
         } else {
             Vec::new()
         };
-        return shim::run_as_shim(&invoked_name, pass_args).await;
+        shim::run_as_shim(&invoked_name, pass_args).await?;
+        // Exit immediately so Tokio runtime drop never blocks on tokio::io::stdin() thread.
+        std::process::exit(0);
     }
 
     let cli = Cli::parse();
@@ -185,7 +196,8 @@ async fn main() -> Result<()> {
                 command,
                 args: rest,
             })
-            .await
+            .await?;
+            std::process::exit(0);
         }
         Commands::Daemon(args) => {
             daemon::run_daemon(

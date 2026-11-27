@@ -10,7 +10,18 @@ use crate::paths;
 use crate::trace::TraceLogger;
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
+
+struct ActiveConnGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub async fn run_daemon(
     config_override: Option<&Path>,
@@ -53,6 +64,7 @@ pub async fn run_daemon(
         cfg.daemon.log_level = lvl.to_string();
     }
 
+    let daemon_idle_timeout_secs = cfg.daemon.idle_timeout_secs;
     init_daemon_logging(&cfg.daemon.log_level);
 
     let trace_path = trace_override.or(cfg.daemon.trace_file.as_deref());
@@ -64,11 +76,15 @@ pub async fn run_daemon(
     tracing::info!(
         pid = std::process::id(),
         endpoint = %paths::ipc_endpoint_display(),
+        idle_timeout_secs = daemon_idle_timeout_secs,
         "lsp-share daemon listening"
     );
 
     let (pool, mut exit_rx) = Pool::new(cfg, trace, child_tracker);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let active_conns = Arc::new(AtomicUsize::new(0));
+    let mut saw_connection = false;
+    let mut empty_since: Option<Instant> = None;
 
     let pool_cleanup = pool.clone();
     tokio::spawn(async move {
@@ -77,19 +93,46 @@ pub async fn run_daemon(
         }
     });
 
+    let mut idle_tick = tokio::time::interval(Duration::from_secs(1));
+    idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             accept_res = listener.accept() => {
                 match accept_res {
                     Ok((read_half, write_half)) => {
+                        saw_connection = true;
+                        empty_since = None;
+                        active_conns.fetch_add(1, Ordering::AcqRel);
+                        let guard = ActiveConnGuard(active_conns.clone());
                         let pool_c = pool.clone();
                         let stx = shutdown_tx.clone();
                         tokio::spawn(async move {
+                            let _guard = guard;
                             server::handle_connection(read_half, write_half, pool_c, stx).await;
                         });
                     }
                     Err(e) => {
                         tracing::error!("IPC accept error: {e}");
+                    }
+                }
+            }
+            _ = idle_tick.tick() => {
+                if daemon_idle_timeout_secs > 0 {
+                    let conns = active_conns.load(Ordering::Acquire);
+                    if conns == 0 && pool.is_empty().await {
+                        let since = empty_since.get_or_insert_with(Instant::now);
+                        let grace = if saw_connection {
+                            Duration::from_secs(daemon_idle_timeout_secs.min(5))
+                        } else {
+                            Duration::from_secs(daemon_idle_timeout_secs)
+                        };
+                        if since.elapsed() >= grace {
+                            tracing::info!("daemon idle with zero active instances and connections; exiting");
+                            break;
+                        }
+                    } else {
+                        empty_since = None;
                     }
                 }
             }
