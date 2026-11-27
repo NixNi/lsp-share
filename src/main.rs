@@ -173,15 +173,17 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     let argv0 = raw_args.first().map(String::as_str);
-    if let Some(invoked_name) = should_dispatch_as_shim(argv0) {
-        let pass_args = if raw_args.len() > 1 {
-            raw_args.split_off(1)
-        } else {
-            Vec::new()
-        };
-        shim::run_as_shim(&invoked_name, pass_args).await?;
-        // Exit immediately so Tokio runtime drop never blocks on tokio::io::stdin() thread.
-        std::process::exit(0);
+    if std::env::var_os("LSP_SHARE_INTERNAL_CLI").is_none() {
+        if let Some(invoked_name) = should_dispatch_as_shim(argv0) {
+            let pass_args = if raw_args.len() > 1 {
+                raw_args.split_off(1)
+            } else {
+                Vec::new()
+            };
+            shim::run_as_shim(&invoked_name, pass_args).await?;
+            // Exit immediately so Tokio runtime drop never blocks on tokio::io::stdin() thread.
+            std::process::exit(0);
+        }
     }
 
     let cli = Cli::parse();

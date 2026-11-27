@@ -148,6 +148,7 @@ async fn spawn_lsp_child(cfg: &InstanceActorConfig) -> Result<ChildProcessHandle
         cmd.env(k, v);
     }
     cmd.env("LSP_SHARE_SPAWNED_BY_DAEMON", "1");
+    cmd.env_remove("LSP_SHARE_INTERNAL_CLI");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

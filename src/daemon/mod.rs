@@ -33,7 +33,7 @@ pub async fn run_daemon(
     if !foreground {
         // Spawn self detached with --foreground and return immediately.
         let exe_raw = std::env::current_exe().context("failed to get current exe")?;
-        let exe = std::fs::canonicalize(&exe_raw).unwrap_or(exe_raw);
+        let exe = paths::clean_canonicalize(&exe_raw);
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("daemon").arg("--foreground");
         if let Some(c) = config_override {
@@ -48,6 +48,7 @@ pub async fn run_daemon(
         if let Some(tr) = trace_override {
             cmd.arg("--trace").arg(tr);
         }
+        cmd.env("LSP_SHARE_INTERNAL_CLI", "1");
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

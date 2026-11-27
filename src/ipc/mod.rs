@@ -70,7 +70,7 @@ fn spawn_detached_daemon(
     trace_override: Option<&Path>,
 ) -> Result<()> {
     let exe_raw = std::env::current_exe().context("failed to locate current lsp-share binary")?;
-    let exe = std::fs::canonicalize(&exe_raw).unwrap_or(exe_raw);
+    let exe = paths::clean_canonicalize(&exe_raw);
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon").arg("--foreground");
     if let Some(cfg) = config_override {
@@ -79,6 +79,7 @@ fn spawn_detached_daemon(
     if let Some(tr) = trace_override {
         cmd.arg("--trace").arg(tr);
     }
+    cmd.env("LSP_SHARE_INTERNAL_CLI", "1");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -999,3 +999,46 @@ async fn e2e_custom_shim_path_and_overwrite_guard() {
 
     env.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn e2e_copied_shim_binary_autostarts_daemon() {
+    let env = TestEnv::new("copied_shim");
+    let mock_log = env._root_dir.path.join("mock_copied_shim.jsonl");
+    let real_bin = env.create_mock_wrapper("real", "copied-mock", &mock_log);
+
+    // Simulate Windows hardlink/copy shim where `canonicalize(current_exe)` keeps the shim name
+    // instead of resolving back to `lsp-share`.
+    let copied_dir = env._root_dir.path.join("copied_shims");
+    std::fs::create_dir_all(&copied_dir).unwrap();
+    let copied_shim = copied_dir.join("copied-mock");
+    std::fs::copy(bin_path(), &copied_shim).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&copied_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let cfg_toml = format!(
+        "[shims.copied-mock]\npath = \"{}\"\ntarget = \"{}\"\n",
+        copied_shim.to_string_lossy().replace('\\', "\\\\"),
+        real_bin.to_string_lossy().replace('\\', "\\\\")
+    );
+    std::fs::write(&env.config_path, cfg_toml).unwrap();
+
+    // With NO daemon running yet, invoking the copied shim must auto-start the daemon cleanly.
+    let ws_uri = file_uri(&env.workspace_dir);
+    let mut client = LspTestClient::spawn_direct(&env, &copied_shim).await;
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "rootUri": ws_uri, "capabilities": {} }
+        }))
+        .await;
+    let (init, _) = client.wait_response_with_cfg(1, None).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "mock-lsp");
+
+    client.shutdown_and_exit().await;
+    env.stop_daemon().await;
+}
